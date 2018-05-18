@@ -1,0 +1,209 @@
+
+Step1
+********************************************************************
+Chimera (AM1-BBC):
+
+Tools->Structural Editing->AddH         #进行加氢
+Tools->Structural Editing->AddH Charge  #进行加电荷   (ff99sb,am1-bbc)
+acpype -i ligand.mol2 -n 1              #配体分子带一个正电荷
+
+
+Step2
+********************************************************************
+准备蛋白质的拓扑
+
+gmx pdb2gmx -f receptor.pdb -o receptor_processed.gro -water tip3p
+
+准备小分子拓扑结构：
+
+将ligand_GMX.itp中顶部的[ atomtypes ]删除，改名为LIG.itp
+
+复制receptor_processed.gro，重命名为complex.gro 将ligand_GMX.gro中内容添加至complex.gro，并修改第二行行数。
+复制ligand_GMX.gro，重命名为LIG.gro
+
+在topol文件中添加小分子的位置限制：
+; Include ligand topology 
+#include "LIG.itp"
+
+在[molecules]下面添加
+ligand        1
+
+Step3：定义单元盒子并添加溶剂
+*************************************************************************
+	
+gmx editconf -f complex.gro -o newbox.gro -bt cubic -d 1.2
+	
+gmx solvate -cp newbox.gro -cs spc216.gro -p topol.top -o solv.gro
+
+gmx editconf -f solv.gro -o solv.pdb   #创建solv.pdb，进行查看
+
+Step4：添加离子
+*************************************************************************
+拷贝amber99sb-ildn-ligand.ff力场文件，重命名为amber99sb-ildn-ligand.ff
+将top文件的[ atomtypes ]可以写入相应力场的ffnonbonded.itp
+topol文件引用力场的位置修改:	
+#include "amber99sb-ligand.ff/forcefield.itp"
+
+; Include water topology
+#include "amber99sb-ligand.ff/tip3p.itp"
+
+; Include topology for ions
+#include "amber99sb-ligand.ff/ions.itp"
+
+gmx grompp -f em.mdp -c solv.gro -p topol.top -o ions.tpr
+
+gmx genion -s ions.tpr -o solv_ions.gro -p topol.top -pname NA -nname CL -nn 1
+
+Select a group: 15
+
+Step5：能量最小化
+*************************************************************************
+(em_real.mdp能量组为energygrps = Protein 3JD，这里3JD需要根据自己的体系进行修改)
+
+gmx grompp -f em_real.mdp -c solv_ions.gro -p topol.top -o em.tpr
+
+运行模拟: gmx mdrun -v -deffnm em
+
+gmx editconf -f em.gro -o em.pdb   #创建em.pdb，进行查看
+
+共轭梯度法:
+(em2.mdp能量组为energygrps = Protein 3JD，这里3JD需要根据自己的体系进行修改)
+gmx grompp -f em2.mdp -c em.gro -p topol.top -o em2.tpr
+
+gmx mdrun -v -deffnm em2
+
+Step6： NVT平衡
+*************************************************************************
+限制配体：
+
+gmx genrestr -f LIG.gro -o posre.itp -fc 1000 1000 1000
+Select a group: 0
+
+
+增加配体限制：
+; Ligand position restraints 
+#ifdef POSRES 
+#include "posre.itp" 
+#endif
+
+热浴:
+gmx make_ndx -f em2.gro -o index.ndx
+
+选择蛋白和配体分为一组: 1 | 13
+退出: q
+
+(nvt.mdp能量组为energygrps = Protein 3JD，这里3JD需要根据自己的体系进行修改)
+(nvt.mdp中tc-grps = Protein_3JD，这里3JD需要根据自己的体系进行修改)
+gmx grompp -f nvt.mdp -c em2.gro -p topol.top -n index.ndx -o nvt.tpr
+gmx mdrun -deffnm nvt
+
+Step7：NPT平衡
+*************************************************************************
+(npt.mdp能量组为energygrps = Protein 3JD，这里3JD需要根据自己的体系进行修改)
+(npt.mdp中tc-grps = Protein_3JD，这里3JD需要根据自己的体系进行修改)
+
+gmx grompp -f npt.mdp -c nvt.gro -t nvt.cpt -p topol.top -n index.ndx -o npt.tpr
+
+gmx mdrun -deffnm npt
+
+
+Step8：MD
+**************************************************************************
+(md.mdp能量组为energygrps = Protein 3JD，这里3JD需要根据自己的体系进行修改)
+(md.mdp中tc-grps = Protein_3JD，这里3JD需要根据自己的体系进行修改)
+gmx grompp -f md.mdp -c npt.gro -t npt.cpt -p topol.top -n index.ndx -o md_0_1.tpr
+gmx mdrun -deffnm md_0_1
+
+Step9：MD-Analysis
+***************************************************************************
+
+gmx energy -f em.edr -o potential.xvg
+选择: 10 0
+xmgrace potential.xvg
+
+gmx energy -f em2.edr -o potential2.xvg
+选择: 10 0
+xmgrace potential2.xvg
+
+gmx energy -f nvt.edr -o temperature.xvg
+选择: 15 0
+xmgrace temperature.xvg
+
+gmx energy -f npt.edr -o pressure.xvg
+选择: 16 0
+xmgrace pressure.xvg 
+
+gmx energy -f npt.edr -o density.xvg
+选择: 22 0
+xmgrace density.xvg
+
+轨迹处理：
+##############################################################################
+gmx trjconv -f md_0_1.xtc -s md_0_1.tpr -pbc whole -ur compact -o mdwhole.xtc
+Select a group: 0
+
+gmx trjconv -f mdwhole.xtc -s md_0_1.tpr -dump 0 -o 1stframe.pdb
+Select a group: 0
+
+gmx trjconv -f mdwhole.xtc -s 1stframe.pdb -pbc nojump -o mdwholeNOjump.xtc
+Select a group: 0
+
+#############################
+RMSD:
+
+gmx rms -s md_0_1.tpr -f mdwholeNOjump.xtc -o rmsd.xvg -tu ns
+Select a group: 4
+Selected 4: 'Backbone'
+xmgrace rmsd.xvg
+
+gmx rms -s em.tpr -f mdwholeNOjump.xtc -o rmsd_xtal.xvg -tu ns
+Select a group: 4
+Selected 4: 'Backbone'
+xmgrace rmsd_xtal.xvg
+
+#############################
+RMSF:
+
+gmx rmsf -s md_0_1.tpr -f mdwholeNOjump.xtc -o rmsf.xvg -oq rmsf.pdb -res -b 15000
+Select a group: 3
+Selected 3: 'C-alpha'
+
+xmgrace rmsf.xvg
+
+H-Bond
+############################
+gmx hbond -f md_0_1.xtc -s md_0_1.tpr -n index.ndx -num human.xvg
+Selected 1: 'Protein'
+Select a group: Selected 13: '3JD'
+
+xmgrace human.xvg
+
+计算溶剂可及表面积
+############################
+gmx sasa -f md_0_1.xtc -o sasa.xvg -n index.ndx -s md_0_1.tpr
+选择: 17
+Selection '17' parsed
+
+xmgrace sasa.xvg
+
+比较结构差异
+###########################
+gmx confrms -f1 receptor.pdb -f2 md_0_1.gro -o fit.pdb
+Select a group: 4
+Selected 4: 'Backbone'
+
+提取轨迹
+###################
+由于在计算能量过程中，是按照每ps来计算，特别费时，所以需要用trjconv把轨迹文件，通过-skip参数设置每隔多长时间读取一次轨迹.
+
+gmx trjconv -f md_0_1.xtc -o trj_10-20ns -b 10000 -e 20000 -dt 100
+
+MMPBSA计算（g_mmpbsa）
+######################
+
+
+
+
+
+
+
